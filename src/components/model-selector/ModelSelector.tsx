@@ -36,6 +36,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
     downloadProgress,
     downloadStats,
     extractingModels,
+    error: switchError,
     selectModel,
   } = useModelStore();
 
@@ -144,15 +145,23 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
   }, [selectModel]);
 
   const handleModelSelect = async (modelId: string) => {
+    if (modelId === currentModel) {
+      setPendingModelId(null);
+      setShowModelDropdown(false);
+      return;
+    }
+
     setPendingModelId(modelId);
     setModelError(null);
     setShowModelDropdown(false);
     const success = await selectModel(modelId);
     if (!success) {
+      const detailedError =
+        useModelStore.getState().error || switchError || t("modelSelector.modelError");
       setPendingModelId(null);
       setModelStatus("error");
-      setModelError("Failed to switch model");
-      onError?.("Failed to switch model");
+      setModelError(detailedError);
+      onError?.(detailedError);
     }
   };
 

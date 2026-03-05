@@ -2,7 +2,7 @@ use crate::settings::{get_settings, write_settings};
 use anyhow::Result;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +24,7 @@ pub enum EngineType {
     MoonshineStreaming,
     SenseVoice,
     GigaAM,
+    Qwen3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -208,6 +209,57 @@ impl ModelManager {
                 supports_translation: false,
                 is_recommended: false,
                 supported_languages: whisper_languages,
+                is_custom: false,
+            },
+        );
+
+        // Qwen3 ASR model (macOS only, MLX-based)
+        // Model files are managed by mlx-audio cache rather than app_data/models.
+        available_models.insert(
+            "qwen3-asr".to_string(),
+            ModelInfo {
+                id: "qwen3-asr".to_string(),
+                name: "Qwen3-ASR-0.6B-8bit (MLX)".to_string(),
+                description:
+                    "MLX backend, 0.6B model, 8-bit quantized. Multilingual ASR."
+                        .to_string(),
+                filename: "qwen3-asr".to_string(),
+                url: Some("mlx://qwen3-asr".to_string()),
+                size_mb: 600,
+                is_downloaded: false,
+                is_downloading: false,
+                partial_size: 0,
+                is_directory: false,
+                engine_type: EngineType::Qwen3,
+                accuracy_score: 0.90,
+                speed_score: 0.85,
+                supports_translation: false,
+                is_recommended: false,
+                supported_languages: vec!["auto".to_string()],
+                is_custom: false,
+            },
+        );
+
+        available_models.insert(
+            "qwen3-asr-1.7b".to_string(),
+            ModelInfo {
+                id: "qwen3-asr-1.7b".to_string(),
+                name: "Qwen3-ASR-1.7B-8bit (MLX)".to_string(),
+                description: "MLX backend, 1.7B model, 8-bit quantized. Multilingual ASR."
+                    .to_string(),
+                filename: "qwen3-asr-1.7b".to_string(),
+                url: Some("mlx://qwen3-asr-1.7b".to_string()),
+                size_mb: 1700,
+                is_downloaded: false,
+                is_downloading: false,
+                partial_size: 0,
+                is_directory: false,
+                engine_type: EngineType::Qwen3,
+                accuracy_score: 0.94,
+                speed_score: 0.70,
+                supports_translation: false,
+                is_recommended: false,
+                supported_languages: vec!["auto".to_string()],
                 is_custom: false,
             },
         );
@@ -487,9 +539,29 @@ impl ModelManager {
     }
 
     fn update_download_status(&self) -> Result<()> {
+        // Pre-compute mlx model cache status to avoid deadlock while iterating mutable map.
+        let mlx_models_status: HashMap<String, bool> = {
+            let models = self.available_models.lock().unwrap();
+            models
+                .values()
+                .filter(|m| m.url.as_ref().map(|u| u.starts_with("mlx://")).unwrap_or(false))
+                .map(|m| (m.id.clone(), self.check_mlx_model_cached(&m.id)))
+                .collect()
+        };
+
         let mut models = self.available_models.lock().unwrap();
 
         for model in models.values_mut() {
+            // Handle mlx-audio managed models (Qwen3)
+            if let Some(url) = &model.url {
+                if url.starts_with("mlx://") {
+                    model.is_downloaded = *mlx_models_status.get(&model.id).unwrap_or(&false);
+                    model.is_downloading = false;
+                    model.partial_size = 0;
+                    continue;
+                }
+            }
+
             if model.is_directory {
                 // For directory-based models, check if the directory exists
                 let model_path = self.models_dir.join(&model.filename);
@@ -699,6 +771,362 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn mlx_model_name_for(model_id: &str) -> Option<&'static str> {
+        match model_id {
+            "qwen3-asr" => Some("mlx-community/Qwen3-ASR-0.6B-8bit"),
+            "qwen3-asr-1.7b" => Some("mlx-community/Qwen3-ASR-1.7B-8bit"),
+            _ => None,
+        }
+    }
+
+    /// Check if an mlx-audio managed model is cached locally.
+    fn check_mlx_model_cached(&self, model_id: &str) -> bool {
+        let mlx_model_name = match Self::mlx_model_name_for(model_id) {
+            Some(name) => name,
+            None => {
+                info!("Unknown mlx-audio model_id: {}", model_id);
+                return false;
+            }
+        };
+
+        let home_dir = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let model_slug = mlx_model_name.replace("/", "--");
+
+        // 1) Legacy mlx-audio cache path (older behavior)
+        let legacy_model_cache_dir = PathBuf::from(&home_dir)
+            .join(".cache/mlx_audio")
+            .join(&model_slug);
+        info!(
+            "Checking legacy MLX cache directory: {:?}",
+            legacy_model_cache_dir
+        );
+
+        if legacy_model_cache_dir.exists() {
+            let essential_files = ["model.safetensors", "config.json", "tokenizer.json"];
+            let found_essential = essential_files
+                .iter()
+                .any(|file| legacy_model_cache_dir.join(file).exists());
+            if found_essential {
+                info!("Model {} found in legacy MLX cache", model_id);
+                return true;
+            }
+
+            let has_any_entries = fs::read_dir(&legacy_model_cache_dir)
+                .ok()
+                .and_then(|mut entries| entries.next())
+                .is_some();
+            if has_any_entries {
+                info!(
+                    "Model {} found in legacy MLX cache (non-empty directory)",
+                    model_id
+                );
+                return true;
+            }
+        }
+
+        // 2) HuggingFace hub cache path (current mlx-audio behavior)
+        let hf_model_cache_dir = PathBuf::from(&home_dir)
+            .join(".cache/huggingface/hub")
+            .join(format!("models--{}", model_slug));
+        info!(
+            "Checking HuggingFace cache directory: {:?}",
+            hf_model_cache_dir
+        );
+
+        if !hf_model_cache_dir.exists() {
+            info!(
+                "HuggingFace cache directory does not exist for model {}",
+                model_id
+            );
+            return false;
+        }
+
+        let refs_main = hf_model_cache_dir.join("refs/main");
+        let snapshots_dir = hf_model_cache_dir.join("snapshots");
+        let blobs_dir = hf_model_cache_dir.join("blobs");
+
+        if refs_main.exists() {
+            let revision = fs::read_to_string(&refs_main)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !revision.is_empty() {
+                let snapshot_for_ref = snapshots_dir.join(&revision);
+                if snapshot_for_ref.exists() && snapshot_for_ref.is_dir() {
+                    info!(
+                        "Model {} found in HuggingFace cache (refs/main -> snapshots/{})",
+                        model_id, revision
+                    );
+                    return true;
+                }
+            }
+        }
+
+        if snapshots_dir.exists() && snapshots_dir.is_dir() {
+            let has_snapshot = fs::read_dir(&snapshots_dir)
+                .ok()
+                .map(|entries| {
+                    entries.flatten().any(|entry| {
+                        let path = entry.path();
+                        if !path.is_dir() {
+                            return false;
+                        }
+                        let has_marker_file = path.join("config.json").exists()
+                            || path.join("model.safetensors").exists()
+                            || path.join("tokenizer.json").exists();
+                        if has_marker_file {
+                            return true;
+                        }
+                        fs::read_dir(&path)
+                            .ok()
+                            .and_then(|mut iter| iter.next())
+                            .is_some()
+                    })
+                })
+                .unwrap_or(false);
+
+            if has_snapshot {
+                info!(
+                    "Model {} found in HuggingFace cache (snapshots present)",
+                    model_id
+                );
+                return true;
+            }
+        }
+
+        let has_blobs = blobs_dir.exists()
+            && blobs_dir.is_dir()
+            && fs::read_dir(&blobs_dir)
+                .ok()
+                .and_then(|mut iter| iter.next())
+                .is_some();
+        if has_blobs && refs_main.exists() {
+            info!(
+                "Model {} found in HuggingFace cache (blobs + refs/main)",
+                model_id
+            );
+            return true;
+        }
+
+        info!(
+            "Model {} not found in either legacy or HuggingFace cache",
+            model_id
+        );
+        false
+    }
+
+    /// Delete an mlx-audio managed model from cache.
+    fn delete_mlx_model(&self, model_id: &str) -> Result<()> {
+        info!("Deleting mlx-audio managed model: {}", model_id);
+
+        let mlx_model_name = Self::mlx_model_name_for(model_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown mlx-audio model: {}", model_id))?;
+
+        let home_dir = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let legacy_cache_dir = PathBuf::from(&home_dir)
+            .join(".cache/mlx_audio")
+            .join(mlx_model_name.replace("/", "--"));
+        let hf_cache_dir = PathBuf::from(&home_dir)
+            .join(".cache/huggingface/hub")
+            .join(format!("models--{}", mlx_model_name.replace("/", "--")));
+
+        info!("Legacy MLX model cache directory: {:?}", legacy_cache_dir);
+        info!("HuggingFace model cache directory: {:?}", hf_cache_dir);
+
+        if legacy_cache_dir.exists() {
+            info!(
+                "Removing legacy mlx-audio model cache: {:?}",
+                legacy_cache_dir
+            );
+            fs::remove_dir_all(&legacy_cache_dir)?;
+            info!("Legacy mlx-audio model cache removed successfully");
+        } else {
+            info!("Legacy mlx-audio model cache not found");
+        }
+
+        if hf_cache_dir.exists() {
+            info!("Removing HuggingFace model cache: {:?}", hf_cache_dir);
+            fs::remove_dir_all(&hf_cache_dir)?;
+            info!("HuggingFace model cache removed successfully");
+        } else {
+            info!("HuggingFace model cache not found");
+        }
+
+        self.update_download_status()?;
+        let _ = self.app_handle.emit("model-deleted", model_id);
+        info!("Model delete completed for: {}", model_id);
+        Ok(())
+    }
+
+    /// Download an mlx-audio managed model using Python mlx-audio.
+    async fn download_mlx_model(&self, model_id: &str) -> Result<()> {
+        info!("========================================");
+        info!("Starting mlx-audio model download: {}", model_id);
+        info!("========================================");
+
+        {
+            let mut models = self.available_models.lock().unwrap();
+            if let Some(model) = models.get_mut(model_id) {
+                model.is_downloading = true;
+                model.partial_size = 0;
+            }
+        }
+
+        let mlx_model_name = Self::mlx_model_name_for(model_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown mlx-audio model: {}", model_id))?;
+
+        info!("MLX model name: {}", mlx_model_name);
+        info!("Checking if model is already cached...");
+        if self.check_mlx_model_cached(model_id) {
+            info!("Model {} is already cached, skipping download", model_id);
+            {
+                let mut models = self.available_models.lock().unwrap();
+                if let Some(model) = models.get_mut(model_id) {
+                    model.is_downloading = false;
+                    model.is_downloaded = true;
+                    model.partial_size = 0;
+                }
+            }
+            let _ = self.app_handle.emit(
+                "model-download-progress",
+                DownloadProgress {
+                    model_id: model_id.to_string(),
+                    downloaded: 600 * 1024 * 1024,
+                    total: 600 * 1024 * 1024,
+                    percentage: 100.0,
+                },
+            );
+            let _ = self.app_handle.emit("model-download-complete", model_id);
+            return Ok(());
+        }
+
+        let _ = self.app_handle.emit(
+            "model-download-progress",
+            DownloadProgress {
+                model_id: model_id.to_string(),
+                downloaded: 0,
+                total: 600 * 1024 * 1024,
+                percentage: 0.0,
+            },
+        );
+
+        let model_id_owned = model_id.to_string();
+        let app_handle = self.app_handle.clone();
+        let mlx_model_name_owned = mlx_model_name.to_string();
+
+        // mlx-audio does not expose byte-level progress; provide smooth simulated progress.
+        let progress_handle = tokio::spawn(async move {
+            let mut progress = 0.0;
+            while progress < 95.0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                progress += 2.5;
+                let _ = app_handle.emit(
+                    "model-download-progress",
+                    DownloadProgress {
+                        model_id: model_id_owned.clone(),
+                        downloaded: (progress * 6.0 * 1024.0 * 1024.0) as u64,
+                        total: 600 * 1024 * 1024,
+                        percentage: progress,
+                    },
+                );
+            }
+        });
+
+        info!("Running Python mlx-audio download script...");
+        let output = tokio::task::spawn_blocking(move || {
+            let script = format!(
+                r#"
+import sys
+import json
+import os
+
+# Set HuggingFace mirror for China region
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+try:
+    from mlx_audio.stt import load as load_stt
+    model = load_stt("{}")
+    print(json.dumps({{"success": True}}))
+except Exception as e:
+    print(json.dumps({{"success": False, "error": str(e)}}))
+    sys.exit(1)
+"#,
+                mlx_model_name_owned
+            );
+            std::process::Command::new("python3")
+                .arg("-c")
+                .arg(script)
+                .output()
+        })
+        .await
+        .map_err(|e| {
+            error!("Failed to spawn mlx-audio download task: {}", e);
+            progress_handle.abort();
+            anyhow::anyhow!("Failed to run mlx-audio download: {}", e)
+        })?
+        .map_err(|e| {
+            error!("mlx-audio download command failed: {}", e);
+            progress_handle.abort();
+            anyhow::anyhow!("Failed to run mlx-audio download: {}", e)
+        })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        info!("mlx-audio download stdout: {}", stdout);
+        if !stderr.is_empty() {
+            warn!("mlx-audio download stderr: {}", stderr);
+        }
+        progress_handle.abort();
+
+        if !output.status.success() {
+            error!("mlx-audio download failed with exit code: {:?}", output.status.code());
+            {
+                let mut models = self.available_models.lock().unwrap();
+                if let Some(model) = models.get_mut(model_id) {
+                    model.is_downloading = false;
+                }
+            }
+            return Err(anyhow::anyhow!("mlx-audio download failed: {}", stderr));
+        }
+
+        if !self.check_mlx_model_cached(model_id) {
+            error!("Model download verification failed - model not found in cache");
+            {
+                let mut models = self.available_models.lock().unwrap();
+                if let Some(model) = models.get_mut(model_id) {
+                    model.is_downloading = false;
+                }
+            }
+            return Err(anyhow::anyhow!("Model download verification failed"));
+        }
+
+        let _ = self.app_handle.emit(
+            "model-download-progress",
+            DownloadProgress {
+                model_id: model_id.to_string(),
+                downloaded: 600 * 1024 * 1024,
+                total: 600 * 1024 * 1024,
+                percentage: 100.0,
+            },
+        );
+
+        {
+            let mut models = self.available_models.lock().unwrap();
+            if let Some(model) = models.get_mut(model_id) {
+                model.is_downloading = false;
+                model.is_downloaded = true;
+                model.partial_size = 0;
+            }
+        }
+
+        let _ = self.app_handle.emit("model-download-complete", model_id);
+
+        info!("========================================");
+        info!("Successfully downloaded mlx-audio model: {}", model_id);
+        info!("========================================");
+        Ok(())
+    }
+
     pub async fn download_model(&self, model_id: &str) -> Result<()> {
         let model_info = {
             let models = self.available_models.lock().unwrap();
@@ -711,6 +1139,16 @@ impl ModelManager {
         let url = model_info
             .url
             .ok_or_else(|| anyhow::anyhow!("No download URL for model"))?;
+
+        // Handle mlx-audio managed models (Qwen3)
+        if url.starts_with("mlx://") {
+            info!(
+                "Detected mlx-audio managed model {}, using mlx download path",
+                model_id
+            );
+            return self.download_mlx_model(model_id).await;
+        }
+
         let model_path = self.models_dir.join(&model_info.filename);
         let partial_path = self
             .models_dir
@@ -1062,6 +1500,13 @@ impl ModelManager {
 
         debug!("ModelManager: Found model info: {:?}", model_info);
 
+        // Handle mlx-audio managed models (Qwen3)
+        if let Some(url) = &model_info.url {
+            if url.starts_with("mlx://") {
+                return self.delete_mlx_model(model_id);
+            }
+        }
+
         let model_path = self.models_dir.join(&model_info.filename);
         let partial_path = self
             .models_dir
@@ -1134,6 +1579,16 @@ impl ModelManager {
                 "Model is currently downloading: {}",
                 model_id
             ));
+        }
+
+        // Handle mlx-audio managed models (Qwen3)
+        if let Some(url) = &model_info.url {
+            if url.starts_with("mlx://") {
+                // The model is managed by mlx-audio cache, not by files under app_data/models.
+                let mlx_model_name = Self::mlx_model_name_for(model_id)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown mlx-audio model: {}", model_id))?;
+                return Ok(PathBuf::from(format!("mlx://{}", mlx_model_name)));
+            }
         }
 
         let model_path = self.models_dir.join(&model_info.filename);

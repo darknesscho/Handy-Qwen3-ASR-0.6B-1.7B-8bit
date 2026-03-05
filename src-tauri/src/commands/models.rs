@@ -75,10 +75,19 @@ pub async fn set_active_model(
         return Err(format!("Model not downloaded: {}", model_id));
     }
 
+    // No-op if the requested model is already loaded.
+    if transcription_manager.get_current_model().as_deref() == Some(model_id.as_str()) {
+        return Ok(());
+    }
+
     // Load the model in the transcription manager
     transcription_manager
         .load_model(&model_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let message = e.to_string();
+            log::error!("Failed to switch model to {}: {}", model_id, message);
+            message
+        })?;
 
     // Update settings
     let mut settings = get_settings(&app_handle);
