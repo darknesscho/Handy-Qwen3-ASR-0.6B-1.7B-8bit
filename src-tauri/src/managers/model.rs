@@ -1,3 +1,4 @@
+use crate::managers::qwen3_engine::resolve_python_command;
 use crate::settings::{get_settings, write_settings};
 use anyhow::Result;
 use flate2::read::GzDecoder;
@@ -1053,7 +1054,11 @@ except Exception as e:
 "#,
                 mlx_model_name_owned
             );
-            std::process::Command::new("python3")
+            
+            // Get the correct Python command (prefer Homebrew/uv venv over system Python)
+            let python_cmd = resolve_python_command().unwrap_or_else(|_| "python3".to_string());
+            
+            std::process::Command::new(python_cmd)
                 .arg("-c")
                 .arg(script)
                 .output()

@@ -89,8 +89,17 @@ fn python_supports_qwen3(command: &str) -> Result<(), String> {
     Err(reason)
 }
 
-fn resolve_python_command() -> std::result::Result<String, Box<dyn std::error::Error>> {
+pub fn resolve_python_command() -> std::result::Result<String, Box<dyn std::error::Error>> {
     let mut candidates = Vec::new();
+
+    // Priority 1: Check for uv virtual environment in current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        let uv_venv_python = cwd.join(".venv/bin/python3");
+        if uv_venv_python.exists() {
+            info!("Found uv virtual environment Python: {}", uv_venv_python.display());
+            add_python_candidate(&mut candidates, uv_venv_python.to_string_lossy().to_string());
+        }
+    }
 
     if let Some(embedded) = get_embedded_python_path() {
         add_python_candidate(&mut candidates, embedded.to_string_lossy().to_string());

@@ -146,7 +146,8 @@ fn build_apple_intelligence_bridge() {
     let framework_path =
         Path::new(&sdk_path).join("System/Library/Frameworks/FoundationModels.framework");
     let has_foundation_models = framework_path.exists();
-    let use_swift_bridge = has_foundation_models;
+    // Force stub mode if HANDY_APPLE_INTELLIGENCE_STUB is set (for development)
+    let use_swift_bridge = has_foundation_models && std::env::var("HANDY_APPLE_INTELLIGENCE_STUB").is_err();
     let object_path_str = object_path
         .to_str()
         .expect("Failed to convert object path to string");

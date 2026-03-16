@@ -11,25 +11,29 @@ import numpy as np
 from pathlib import Path
 import time
 
-# 设置 HuggingFace 镜像（中国区可加速）
+# HuggingFace direct connection (TUN proxy enabled)
 import os
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+os.environ["HF_ENDPOINT"] = "https://huggingface.co"
 
 # Global model cache
 _stt_model = None
 _model_name = os.environ.get("HANDY_QWEN3_MODEL", "mlx-community/Qwen3-ASR-0.6B-8bit")
+
 
 def load_model():
     """Load model once and cache it globally"""
     global _stt_model
     if _stt_model is None:
         from mlx_audio.stt import load as load_stt
+
         print(f"Loading Qwen3 ASR model: {_model_name}", file=sys.stderr, flush=True)
         start = time.time()
         _stt_model = load_stt(_model_name)
         load_time = time.time() - start
         print(f"Model loaded in {load_time:.2f}s", file=sys.stderr, flush=True)
     return _stt_model
+
 
 def transcribe_audio(
     audio: np.ndarray,
@@ -46,7 +50,7 @@ def transcribe_audio(
         stt_model = load_model()
 
         # Save audio to temporary file (mlx-audio expects file path)
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
             temp_path = tmp_file.name
 
         try:
@@ -97,12 +101,12 @@ def transcribe_audio(
             text = ""
             try:
                 for chunk in result_generator:
-                    if hasattr(chunk, 'text'):
+                    if hasattr(chunk, "text"):
                         text += chunk.text
                     elif isinstance(chunk, str):
                         text += chunk
             except Exception:
-                if hasattr(result_generator, 'text'):
+                if hasattr(result_generator, "text"):
                     text = result_generator.text
                 else:
                     text = str(result_generator)
@@ -118,13 +122,15 @@ def transcribe_audio(
 
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         return {
             "error": str(e),
             "text": f"[转录错误: {str(e)}]",
             "language": "auto",
-            "confidence": 0.0
+            "confidence": 0.0,
         }
+
 
 def main():
     """Main entry point - persistent server mode"""
@@ -154,15 +160,15 @@ def main():
             data = json.loads(line)
 
             # Parse audio data
-            audio = np.array(data['audio'], dtype=np.float32)
+            audio = np.array(data["audio"], dtype=np.float32)
 
             # Parse params
-            params = data.get('params', {})
+            params = data.get("params", {})
             if isinstance(params, str):
                 params = json.loads(params)
 
-            sample_rate = params.get('sample_rate', 16000)
-            language = params.get('language', 'auto')
+            sample_rate = params.get("sample_rate", 16000)
+            language = params.get("language", "auto")
             # Run transcription
             result = transcribe_audio(audio, sample_rate, language)
 
@@ -171,14 +177,16 @@ def main():
 
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             error_response = {
                 "error": str(e),
                 "text": f"[处理错误: {str(e)}]",
                 "language": "auto",
-                "confidence": 0.0
+                "confidence": 0.0,
             }
             print(json.dumps(error_response), flush=True)
+
 
 if __name__ == "__main__":
     main()
