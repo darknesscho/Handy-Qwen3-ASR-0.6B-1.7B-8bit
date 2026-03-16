@@ -1,5 +1,8 @@
 # Handy
 
+> **⚠️ 本分支说明**：此为 `bug_fix` 分支，基于 Handy 项目添加了 Qwen3-ASR 支持，修复了 Python 环境检测和模型下载问题。
+> 适用于 macOS Apple Silicon 设备，使用 Qwen3-ASR-0.6B-8bit 模型进行离线语音转文字。
+
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?style=for-the-badge&logo=discord&logoColor=white)](https://discord.com/invite/WVBeWsNXK4)
 
 **A free, open source, and extensible speech-to-text application that works completely offline.**
