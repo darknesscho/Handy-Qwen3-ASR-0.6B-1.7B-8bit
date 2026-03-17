@@ -1,7 +1,9 @@
 # Handy
 
-> **⚠️ 本分支说明**：此为 `bug_fix` 分支，基于 Handy 项目添加了 Qwen3-ASR 支持，修复了 Python 环境检测和模型下载问题。
-> 适用于 macOS Apple Silicon 设备，使用 Qwen3-ASR-0.6B-8bit 模型进行离线语音转文字。
+> **⚠️ 本分支说明**：此为 `bug_fix` 分支，基于 Handy 项目添加了 Qwen3-ASR 支持。
+> 
+> **最新版本**：使用外部 API 模式调用 Qwen3-ASR 模型，不再本地加载模型。
+> 适用于 macOS Apple Silicon 设备，通过本地 MLX FastAPI 服务进行语音转文字。
 
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?style=for-the-badge&logo=discord&logoColor=white)](https://discord.com/invite/WVBeWsNXK4)
 
@@ -37,7 +39,46 @@ The process is entirely local:
 
 ## Quick Start
 
-### Installation
+### External ASR Mode (Qwen3-ASR)
+
+This branch uses **external API mode** to call Qwen3-ASR models via a local MLX FastAPI service.
+
+**Prerequisites:**
+
+1. **MLX FastAPI Service** must be running:
+   ```bash
+   cd ~/TOOLS/mlx-fastapi
+   python main.py
+   ```
+   - Service URL: `http://127.0.0.1:8001`
+   - ASR Endpoint: `POST /v1/audio/transcriptions`
+   - Model: `qwen3-asr-0.6b`
+
+2. **macOS Apple Silicon** device (for MLX support)
+
+**Usage:**
+
+1. Launch Handy and select **Qwen3-ASR-0.6B-8bit** model
+2. Press the recording shortcut (default: `Option+Space`)
+3. Speak and release the shortcut
+4. Transcription result will be pasted automatically
+
+**How it works:**
+
+- Handy converts recorded audio to WAV format
+- Sends audio to MLX FastAPI via HTTP POST
+- MLX FastAPI processes with Qwen3-ASR model
+- Returns transcription text to Handy
+- Handy pastes the text to the active application
+
+**Advantages:**
+
+- ✅ No local model loading in Handy
+- ✅ Shared MLX FastAPI service for multiple apps
+- ✅ Faster startup (no model initialization)
+- ✅ Lower memory usage in Handy
+
+### Installation (Standard)
 
 1. Download the latest release from the [releases page](https://github.com/cjpais/Handy/releases) or the [website](https://handy.computer)
    - **macOS**: Also available via [Homebrew cask](https://formulae.brew.sh/cask/handy): `brew install --cask handy`
@@ -63,6 +104,27 @@ Handy is built as a Tauri application combining:
   - `vad-rs`: Voice Activity Detection
   - `rdev`: Global keyboard shortcuts and system events
   - `rubato`: Audio resampling
+  - `reqwest`: HTTP client for external ASR API calls
+
+### External ASR Architecture
+
+In this branch, Qwen3-ASR transcription uses an external service:
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Handy     │────▶│  MLX FastAPI     │────▶│  Qwen3-ASR      │
+│  (Rust)     │ WAV │  (Python)        │     │  Model          │
+└─────────────┘     └──────────────────┘     └─────────────────┘
+      ▲                       │
+      │                       │
+      └────── Text ───────────┘
+```
+
+1. **Audio Recording**: Handy records audio using `cpal` (48kHz, mono, f32)
+2. **WAV Conversion**: Audio is converted to WAV format (16kHz, mono, int16)
+3. **HTTP Request**: WAV data sent to `http://127.0.0.1:8001/v1/audio/transcriptions`
+4. **ASR Processing**: MLX FastAPI loads and runs Qwen3-ASR model
+5. **Result**: Transcription text returned to Handy
 
 ### Debug Mode
 
