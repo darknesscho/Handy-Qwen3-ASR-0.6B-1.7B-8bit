@@ -1,4 +1,6 @@
 use crate::audio_toolkit::{apply_custom_words, filter_transcription_output};
+use crate::audio_utils::pcm_to_wav;
+use crate::managers::external_asr::ExternalASRClient;
 use crate::managers::model::{EngineType, ModelManager};
 use crate::managers::qwen3_engine::{Qwen3Engine, Qwen3InferenceParams};
 use crate::settings::{get_settings, ModelUnloadTimeout};
@@ -370,38 +372,14 @@ impl TranscriptionManager {
                 LoadedEngine::GigaAM(engine)
             }
             EngineType::Qwen3 => {
-                let mut engine = Qwen3Engine::new();
-                let model_ref = model_path
-                    .to_string_lossy()
-                    .trim_start_matches("mlx://")
-                    .to_string();
-                if model_ref.is_empty() {
-                    let error_msg = format!("Invalid Qwen3 model reference for {}", model_id);
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "loading_failed".to_string(),
-                            model_id: Some(model_id.to_string()),
-                            model_name: Some(model_info.name.clone()),
-                            error: Some(error_msg.clone()),
-                        },
-                    );
-                    return Err(anyhow::anyhow!(error_msg));
-                }
+                // External ASR mode - no local model loading needed
+                // Model is served by MLX FastAPI at http://127.0.0.1:8001
+                info!("Using external ASR API for Qwen3 model: {}", model_id);
 
-                engine.load_model(&model_ref).map_err(|e| {
-                    let error_msg = format!("Failed to load Qwen3 model {}: {}", model_id, e);
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "loading_failed".to_string(),
-                            model_id: Some(model_id.to_string()),
-                            model_name: Some(model_info.name.clone()),
-                            error: Some(error_msg.clone()),
-                        },
-                    );
-                    anyhow::anyhow!(error_msg)
-                })?;
+                // Create a minimal Qwen3Engine instance (won't be used for inference)
+                let engine = Qwen3Engine::new();
+
+                info!("External ASR mode initialized for {}", model_id);
                 LoadedEngine::Qwen3(engine)
             }
         };
@@ -587,19 +565,28 @@ impl TranscriptionManager {
                         LoadedEngine::GigaAM(gigaam_engine) => gigaam_engine
                             .transcribe_samples(audio, None)
                             .map_err(|e| anyhow::anyhow!("GigaAM transcription failed: {}", e)),
-                        LoadedEngine::Qwen3(qwen3_engine) => {
-                            let params = Qwen3InferenceParams {
-                                language: if settings.selected_language == "auto" {
-                                    None
-                                } else {
-                                    Some(settings.selected_language.clone())
-                                },
-                            };
-                            let result = qwen3_engine
-                                .transcribe_samples(audio, Some(params))
-                                .map_err(|e| anyhow::anyhow!("Qwen3 transcription failed: {}", e))?;
+                        LoadedEngine::Qwen3(_qwen3_engine) => {
+                            // External ASR mode - call external API using std::thread
+                            info!("Using external ASR API for transcription");
+
+                            // Convert PCM to WAV
+                            let wav_data = pcm_to_wav(&audio, 16000);
+
+                            // Use std::thread to completely avoid tokio runtime issues
+                            let handle = std::thread::spawn(move || {
+                                ExternalASRClient::transcribe_blocking(&wav_data)
+                            });
+
+                            // Wait for the thread to complete
+                            let text = handle
+                                .join()
+                                .map_err(|_| anyhow::anyhow!("Thread join failed"))?
+                                .map_err(|e| {
+                                    anyhow::anyhow!("External ASR API call failed: {}", e)
+                                })?;
+
                             Ok(transcribe_rs::TranscriptionResult {
-                                text: result.text,
+                                text,
                                 segments: None,
                             })
                         }

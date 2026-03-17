@@ -553,6 +553,14 @@ impl ModelManager {
         let mut models = self.available_models.lock().unwrap();
 
         for model in models.values_mut() {
+            // External ASR mode: qwen3-asr uses external API, always mark as downloaded
+            if model.id == "qwen3-asr" || model.id == "qwen3-asr-1.7b" {
+                model.is_downloaded = true;
+                model.is_downloading = false;
+                model.partial_size = 0;
+                continue;
+            }
+
             // Handle mlx-audio managed models (Qwen3)
             if let Some(url) = &model.url {
                 if url.starts_with("mlx://") {
